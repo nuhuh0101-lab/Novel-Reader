@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:epubx/epubx.dart' as epubx;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'basic_info.dart';
@@ -40,6 +41,53 @@ class _MainPageState extends State<MainPage> {
     super.initState();
     _loadSavedFiles(); // Automatically retrieve files on app startup
   }
+
+  Future<BasicInfo?> loadBook(String path) async {
+  BasicInfo? book;
+
+  try {
+    final epubBook = await loadEpubBook(path);
+
+    Uint8List? coverBytes;
+
+    coverBytes = getCoverFromMetadata(epubBook);
+
+    coverBytes ??= getFirstPageImage(epubBook);
+
+    if (coverBytes == null && epubBook.CoverImage != null) {
+      coverBytes = Uint8List.fromList(
+        img.encodeJpg(epubBook.CoverImage!),
+      );
+    }
+
+    if (coverBytes == null &&
+        epubBook.Content?.Images != null &&
+        epubBook.Content!.Images!.isNotEmpty) {
+      final firstImage =
+          epubBook.Content!.Images!.values.first;
+
+      if (firstImage.Content != null) {
+        coverBytes = Uint8List.fromList(
+          firstImage.Content!,
+        );
+      }
+    }
+
+    book = BasicInfo(
+      path: path,
+      title: epubBook.Title ?? "Unknown Title",
+      authorName: epubBook.Author ?? "Unknown Author",
+      cover: coverBytes,
+    );
+  } catch (e) {
+    print('epubx failed for $path');
+    print(e);
+
+    book = await loadBrokenEpub(path);
+  }
+
+  return book;
+}
 
   Future<BasicInfo?> loadBrokenEpub(String filePath) async {
   try {
@@ -351,7 +399,7 @@ class _MainPageState extends State<MainPage> {
   epubx.EpubTextContentFile? htmlFile;
 
   for (final entry in htmlFiles.entries) {
-    if (entry.key == firstDocument!.Href ||
+    if (entry.key == firstDocument.Href ||
         entry.value.FileName == firstDocument.Href) {
       htmlFile = entry.value;
       break;
@@ -429,102 +477,76 @@ class _MainPageState extends State<MainPage> {
 
 
   Future<void> loadBooks() async {
-    books.clear();
+  books.clear();
 
-    for (final path in _savedFilePaths) {
-      BasicInfo? book;
+  for (final path in _savedFilePaths) {
+    final book = await loadBook(path);
 
-      try {
-        final epubBook = await loadEpubBook(path);
-
-        Uint8List? coverBytes;
-
-        coverBytes = getCoverFromMetadata(epubBook);
-
-        coverBytes ??= getFirstPageImage(epubBook);
-
-        if (coverBytes == null && epubBook.CoverImage != null) {
-          coverBytes = Uint8List.fromList(
-            img.encodeJpg(epubBook.CoverImage!),
-          );
-        }
-
-        if (coverBytes == null &&
-            epubBook.Content?.Images != null &&
-            epubBook.Content!.Images!.isNotEmpty) {
-          final firstImage =
-              epubBook.Content!.Images!.values.first;
-
-          if (firstImage.Content != null) {
-            coverBytes = Uint8List.fromList(
-              firstImage.Content!,
-            );
-          }
-        }
-
-        book = BasicInfo(
-          path: path,
-          title: epubBook.Title ?? "Unknown Title",
-          authorName: epubBook.Author ?? "Unknown Author",
-          cover: coverBytes,
-        );
-      } catch (e) {
-        print('epubx failed for $path');
-        print(e);
-
-        book = await loadBrokenEpub(path);
-      }
-
-      if (book != null) {
-        books.add(book);
-      }
-    }
-
-    setState(() {});
-  }
-
-  Future<void> pickAndSaveFile() async{
-    List<PlatformFile> selectedFiles = await FilePicker.pickFiles(
-      type: FileType.custom,
-      allowedExtensions: ['epub'],
-    );
-    if(selectedFiles.isNotEmpty){
-      final Directory appDocDir = await getApplicationDocumentsDirectory();
-      final prefs = await SharedPreferences.getInstance();
-
-      List<String> updatedPaths = List.from(_savedFilePaths);
-
-      for (PlatformFile file in selectedFiles) {
-      if (file.path != null) {
-        // Prevent naming conflicts if a file with the same name already exists
-        String permanentPath = '${appDocDir.path}/${file.name}';
-        
-        // Optional: If file already exists, you can append a timestamp to avoid overwriting
-        if (await File(permanentPath).exists()) {
-          continue;
-        }
-
-        // 4. Duplicate the file to permanent local storage
-        final File cachedFile = File(file.path!);
-        await cachedFile.copy(permanentPath);
-
-        // Add the new path to our tracker
-        updatedPaths.add(permanentPath);
-      }
-    }
-    await prefs.setStringList('saved_files', updatedPaths);
-    
-    setState(() {
-      _savedFilePaths = updatedPaths;
-    });
-
-    await loadBooks();
-    } 
-
-    else {
-      print('User canceled the multiple selection.');
+    if (book != null) {
+      books.add(book);
     }
   }
+
+  setState(() {});
+}
+
+  Future<void> pickAndSaveFile() async {
+  List<PlatformFile> selectedFiles = await FilePicker.pickFiles(
+    type: FileType.custom,
+    allowedExtensions: ['epub'],
+  );
+
+  if (selectedFiles.isEmpty) {
+    print('User canceled the multiple selection.');
+    return;
+  }
+
+  final Directory appDocDir =
+      await getApplicationDocumentsDirectory();
+
+  final prefs = await SharedPreferences.getInstance();
+
+  List<String> updatedPaths = List.from(_savedFilePaths);
+  List<String> newPaths = [];
+
+  for (PlatformFile file in selectedFiles) {
+    if (file.path != null) {
+      String permanentPath =
+          '${appDocDir.path}/${file.name}';
+
+      if (await File(permanentPath).exists()) {
+        continue;
+      }
+
+      final File cachedFile = File(file.path!);
+
+      await cachedFile.copy(permanentPath);
+
+      updatedPaths.add(permanentPath);
+      newPaths.add(permanentPath);
+    }
+  }
+
+  await prefs.setStringList(
+    'saved_files',
+    updatedPaths,
+  );
+
+  List<BasicInfo> newBooks = [];
+
+  for (final path in newPaths) {
+    final book = await loadBook(path);
+
+    if (book != null) {
+      newBooks.add(book);
+    }
+  }
+
+  setState(() {
+    _savedFilePaths = updatedPaths;
+    books.addAll(newBooks);
+  });
+}
 
   Future<void> deleteAllFiles() async {
   for (final path in _savedFilePaths) {
@@ -547,6 +569,7 @@ class _MainPageState extends State<MainPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      backgroundColor: Colors.cyanAccent,
       floatingActionButton: FloatingActionButton(
         shape: CircleBorder(),
         elevation: 2,
@@ -570,38 +593,70 @@ class _MainPageState extends State<MainPage> {
       body: SafeArea(
         child: ListView.builder(
         itemCount: books.length,
+        scrollCacheExtent: ScrollCacheExtent.pixels(500),
         itemBuilder: (context, index){
 
           return 
               Container(
                 height: 180,
+                margin: EdgeInsets.only(bottom: 10),
                 decoration: BoxDecoration(
-                  color: Colors.white
+                  gradient: LinearGradient(colors: [const Color.fromARGB(255, 123, 241, 33), const Color.fromARGB(255, 255, 139, 253)])
                   
                 ),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.start,
                   children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.start,
-                      children: [
-                        if(books[index].cover != null)
-                          Image.memory(
-                          books[index].cover!,
-                          width: 120,
-                          height: 180,
-                          fit: BoxFit.cover,
-                        )
-                        else
-                         Image.asset(
-                          'assets/place_holder_image.png',
-                          width: 120,
-                          height: 180,
-                          fit: BoxFit.cover,)
-                      ],
-                    
+                    if(books[index].cover != null)
+                      Image.memory(
+                      books[index].cover!,
+                      width: 120,
+                      height: 180,
+                      fit: BoxFit.cover,
+                      )
+                    else
+                      Image.asset(
+                        'assets/place_holder_image.png',
+                        width: 120,
+                        height: 180,
+                        fit: BoxFit.cover,),
+
+                    Expanded(
+                      child: Padding(
+                        padding: const EdgeInsets.all(5.0),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text(
+                              books[index].title,
+                              style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.bold,
+                                color: Colors.white
+                              ),
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              ),
+                            
+                            SizedBox(height: 5,),
+
+                            Text(
+                              books[index].authorName,
+                              style: TextStyle(
+                                color: const Color.fromARGB(255, 136, 136, 137),
+                                fontSize: 12
+                              ),
+                            ),
+
+                            SizedBox(height: 5,),
+
+                          ],
+                        ),
+                      ),
                     )
+                    
                   ],
+                
                 ),
               );
         }

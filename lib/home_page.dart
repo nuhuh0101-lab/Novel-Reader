@@ -575,7 +575,7 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: Colors.cyanAccent,
+      backgroundColor: const Color.fromARGB(255, 134, 67, 107),
       floatingActionButton: FloatingActionButton(
         shape: CircleBorder(),
         elevation: 2,
@@ -616,6 +616,7 @@ class _HomePageState extends State<HomePage> {
                       if(books[index].cover != null)
                         GestureDetector(
                           onTap: () {
+                            print('OPENING READER PAGE');
                             Navigator.push(
                               context, MaterialPageRoute(
                                 builder: (context) => ReaderPage(book: books[index]
@@ -633,6 +634,7 @@ class _HomePageState extends State<HomePage> {
                       else
                         GestureDetector(
                           onTap: () {
+                            print('OPENING READER PAGE');
                             Navigator.push(
                               context, MaterialPageRoute(
                                 builder: (context) => ReaderPage(book: books[index]

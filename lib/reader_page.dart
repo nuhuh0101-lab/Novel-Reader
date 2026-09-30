@@ -9,6 +9,7 @@ import 'package:archive/archive.dart';
 import 'package:epubx/epubx.dart' as epubx;
 import 'package:flutter_html/flutter_html.dart';
 import 'package:xml/xml.dart';
+import 'package:image/image.dart' as img;
 
 class ReaderPage extends StatefulWidget {
   final BasicInfo book;
@@ -53,29 +54,6 @@ class _ReaderPageState extends State<ReaderPage> {
    loadElements();
   }
 
-
-// Future<epubx.EpubBook> loadReaderBook(String path) async {
-//   final file = File(path);
-
-//   final bytes = await file.readAsBytes();
-
-//   try {
-    
-//     final book = await epubx.EpubReader.readBook(bytes);
-
-//     return book;
-//   } catch (e) {
-
-//     final repairedBytes = await repairMissingNcx(bytes);
-
-//     final book = await epubx.EpubReader.readBook(
-//       repairedBytes,
-//     );
-
-//     return book;
-//   }
-// }
-
   Future<epubx.EpubBook> loadReaderBook(String path) async {
   final file = File(path);
 
@@ -84,10 +62,21 @@ class _ReaderPageState extends State<ReaderPage> {
  try {
   final book = await epubx.EpubReader.readBook(bytes);
 
+final image = book.Content?.Images?['Images/image_rsrc34F.jpg'];
+
+print('IMAGE OBJECT: $image');
+print('IMAGE RUNTIME TYPE: ${image.runtimeType}');
+print('IMAGE BYTES: ${image?.Content?.length}');
+
+
+if (image != null) {
+  print('FIRST 10 BYTES: ${image.Content!.take(10).toList()}');
+}
+
   final allElements = <EpubElement>[];
 
   for (final chapter in book.Chapters!) {
-    final chapterElements = getChapterElements(chapter);
+    final chapterElements = getChapterElements(chapter, book.Content?.Images);    
 
     allElements.addAll(chapterElements);
   }
@@ -113,40 +102,90 @@ class _ReaderPageState extends State<ReaderPage> {
 List<XmlElement> parseChapterElements(String htmlContent) {
   final document = XmlDocument.parse(htmlContent);
 
+  final images = document.findAllElements('img');
+
+  for (final image in images) {
+    print('IMAGE: ${image.outerXml}');
+  }
+
   return document
       .findAllElements('body')
       .expand((body) => body.children.whereType<XmlElement>())
       .toList();
 }
 
-List<EpubElement> getChapterElements(epubx.EpubChapter chapter) {
+List<EpubElement> getChapterElements(
+  epubx.EpubChapter chapter,
+  Map<String, epubx.EpubByteContentFile>? images,
+  ) {
   final xmlElements = parseChapterElements(
     chapter.HtmlContent!,
   );
 
   return xmlElements
-      .map((element) => convertToEpubElement(element))
+      .map((element) => convertToEpubElement(element, images))
       .toList();
 }
 
-EpubElement convertToEpubElement(XmlElement element) {
+EpubElement convertToEpubElement(
+  XmlElement element,
+  Map<String, epubx.EpubByteContentFile>? images,
+) {
+
+  final isImage = element.name.local == 'img';
+
+  final imageElements = element.findElements('img');
+  final containsImage = imageElements.isNotEmpty;
+  if (containsImage) {
+    print('DIV CONTAINS IMAGE: ${imageElements.first.outerXml}');
+  }
+
   final className = element.getAttribute('class');
 
   EpubElementType type;
 
-  if (className == 'heading_s5M') {
+  if (isImage || containsImage) {
+    type = EpubElementType.image;
+  } else if (className == 'heading_s5M') {
     type = EpubElementType.heading;
   } else if (className == 'class_s5P' ||
-             className == 'class_s5S') {
+            className == 'class_s5S') {
     type = EpubElementType.paragraph;
   } else {
     type = EpubElementType.other;
   }
 
+  Uint8List? imageBytes;
+
+  if (isImage || containsImage) {
+    final imgElement = isImage
+        ? element
+        : imageElements.first;
+
+    final src = imgElement.getAttribute('src');
+
+    if (src != null) {
+      final imagePath = src.replaceFirst('../', '');
+
+      final content = images?[imagePath]?.Content;
+
+      if (content != null) {
+        imageBytes = Uint8List.fromList(content);
+      }
+    }
+  }
+
+  if (imageBytes != null) {
+    print('IMAGE BYTES FOUND: ${imageBytes.length}');
+  }
+
+
   return EpubElement(
     type: type,
     text: element.innerText.trim(),
     html: element.outerXml,
+    imageBytes: imageBytes,
+
   );
 }
 
@@ -823,47 +862,53 @@ if (encoded == null) {
   List<EpubPage> pages = [];
   int currentPage = 0;
   bool isPaginating = false;
+  double? lastPageWidth;
+  double? lastPageHeight;
 
-  String getTextThatFits(
-    String text,
-    double pageWidth,
-    double pageHeight,
-    TextStyle style,
-    BuildContext context,
-  ) {
-    final painter = TextPainter(
-      text: TextSpan(
-        text: text,
-        style: style,
-      ),
-      textDirection: TextDirection.ltr,
-      textScaler: MediaQuery.textScalerOf(context),
-    );
 
-    painter.layout(maxWidth: pageWidth);
+String getTextThatFits(
+  String text,
+  double pageWidth,
+  double pageHeight,
+  TextStyle style,
+  BuildContext context,
+) {
+  final painter = TextPainter(
+    text: TextSpan(
+      text: text,
+      style: style,
+    ),
+    textDirection: TextDirection.ltr,
+    textScaler: MediaQuery.textScalerOf(context),
+  );
 
-    final lines = painter.computeLineMetrics();
+  painter.layout(maxWidth: pageWidth);
 
-    int endOffset = 0;
+  final lines = painter.computeLineMetrics();
 
-    for (final line in lines) {
-      final bottom = line.baseline + line.descent;
+  int endOffset = 0;
+  double usedHeight = 0;
 
-      if (bottom <= pageHeight) {
-        final position = painter.getPositionForOffset(
-          Offset(0, line.baseline),
-        );
+  for (final line in lines) {
+    final lineHeight = line.height;
 
-        final boundary = painter.getLineBoundary(position);
+    if (usedHeight + lineHeight <= pageHeight) {
+      usedHeight += lineHeight;
 
-        endOffset = boundary.end;
-      } else {
-        break;
-      }
+      final position = painter.getPositionForOffset(
+         Offset(0, line.baseline - line.height / 2),
+      );
+
+      final boundary = painter.getLineBoundary(position);
+
+      endOffset = boundary.end;
+    } else {
+      break;
     }
-
-    return text.substring(0, endOffset);
   }
+
+  return text.substring(0, endOffset);
+}
 
 List<String> paginateText(
   String text,
@@ -902,25 +947,25 @@ List<String> paginateText(
   return pages;
 }
 
-  double getTextHeight(
-    String text,
-    double pageWidth,
-    TextStyle style,
-    BuildContext context,
-  ) {
-    final painter = TextPainter(
-      text: TextSpan(
-        text: text,
-        style: style,
-      ),
-      textDirection: TextDirection.ltr,
-      textScaler: MediaQuery.textScalerOf(context),
-    );
+double getTextHeight(
+  String text,
+  double pageWidth,
+  TextStyle style,
+  BuildContext context,
+) {
+  final painter = TextPainter(
+    text: TextSpan(
+      text: text,
+      style: style,
+    ),
+    textDirection: TextDirection.ltr,
+    textScaler: MediaQuery.textScalerOf(context),
+  );
 
-    painter.layout(maxWidth: pageWidth);
+  painter.layout(maxWidth: pageWidth);
 
-    return painter.height.ceilToDouble();
-  }
+  return painter.height;
+}
 
   bool textFits(
     String text,
@@ -954,15 +999,76 @@ List<String> paginateText(
 
   double remainingHeight = pageHeight;
   bool isFirstElementOnPage = true;
+  EpubElementType? previousElementType;
 
   for (final element in elements) {
+
+
     final elementStyle =
         element.type == EpubElementType.heading
             ? headingStyle
             : textStyle;
 
     if (element.type != EpubElementType.paragraph &&
-        element.type != EpubElementType.heading) {
+        element.type != EpubElementType.heading &&
+        element.type != EpubElementType.image) {
+      continue;
+    }
+
+    if (element.type == EpubElementType.image) {
+
+      final imageWidth = (getImageWidth(element.imageBytes) ?? pageWidth)
+        .clamp(0, pageWidth)
+        .toDouble();
+
+      final imageHeight = getImageHeightForWidth(
+        element.imageBytes,
+        imageWidth,
+      );
+
+      if (imageHeight == null) {
+        continue;
+      }
+
+      print(
+        'IMAGE: height=$imageHeight, '
+        'remaining=$remainingHeight',
+      );
+
+      if (imageHeight <= remainingHeight) {
+        currentPageElements.add(
+          EpubPageElement(
+            type: element.type,
+            text: '',
+            imageBytes: element.imageBytes,
+          ),
+        );
+
+        remainingHeight -= imageHeight;
+        isFirstElementOnPage = false;
+        previousElementType = EpubElementType.image;
+      } else {
+        if (currentPageElements.isNotEmpty) {
+          pages.add(
+            EpubPage(
+              elements: currentPageElements,
+            ),
+          );
+        }
+
+        currentPageElements = [
+          EpubPageElement(
+            type: element.type,
+            text: '',
+            imageBytes: element.imageBytes,
+          ),
+        ];
+
+        remainingHeight = pageHeight - imageHeight;
+        isFirstElementOnPage = false;
+        previousElementType = EpubElementType.image;
+      }
+
       continue;
     }
 
@@ -977,12 +1083,14 @@ List<String> paginateText(
 
         currentPageElements = [];
         isFirstElementOnPage = true;
+        previousElementType = null;
       }
 
       currentPageElements.add(
         EpubPageElement(
           type: element.type,
           text: element.text,
+          imageBytes: element.imageBytes,
         ),
       );
 
@@ -995,6 +1103,7 @@ List<String> paginateText(
           );
 
       isFirstElementOnPage = false;
+      previousElementType = EpubElementType.heading;
 
       continue;
     }
@@ -1007,27 +1116,36 @@ List<String> paginateText(
       context,
     );
 
-    final requiredHeight = isFirstElementOnPage
-        ? textHeight
-        : textHeight + paragraphSpacing;
+double spacing = 0;
+
+if (!isFirstElementOnPage) {
+  if (previousElementType == EpubElementType.heading) {
+    spacing = headingSpacing;
+  } else if (previousElementType == EpubElementType.paragraph) {
+    spacing = paragraphSpacing;
+  }
+}
+
+final requiredHeight = textHeight + spacing;
+
 
     if (requiredHeight <= remainingHeight) {
       currentPageElements.add(
         EpubPageElement(
           type: element.type,
           text: element.text,
+          imageBytes: element.imageBytes,
         ),
       );
 
       remainingHeight -= requiredHeight;
 
       isFirstElementOnPage = false;
-    } else {
-      print('DOES NOT FIT');
+      previousElementType = EpubElementType.paragraph;
 
-      final availableHeight = isFirstElementOnPage
-          ? remainingHeight
-          : remainingHeight - paragraphSpacing;
+    } else {
+
+      final availableHeight = remainingHeight - spacing;
 
       final textPages = paginateText(
         element.text,
@@ -1037,6 +1155,7 @@ List<String> paginateText(
         elementStyle,
         context,
       );
+
 
       if (textPages.isEmpty) {
         if (currentPageElements.isNotEmpty) {
@@ -1048,6 +1167,7 @@ List<String> paginateText(
 
           currentPageElements = [];
           isFirstElementOnPage = true;
+          previousElementType = null;
         }
 
         final newTextPages = paginateText(
@@ -1067,6 +1187,7 @@ List<String> paginateText(
                   EpubPageElement(
                     type: element.type,
                     text: newTextPages[i],
+                    imageBytes: element.imageBytes,
                   ),
                 ],
               ),
@@ -1076,6 +1197,7 @@ List<String> paginateText(
               EpubPageElement(
                 type: element.type,
                 text: newTextPages[i],
+                imageBytes: element.imageBytes,
               ),
             );
 
@@ -1088,6 +1210,7 @@ List<String> paginateText(
                 );
 
             isFirstElementOnPage = false;
+            previousElementType = EpubElementType.paragraph;
           }
         }
 
@@ -1099,8 +1222,11 @@ List<String> paginateText(
         EpubPageElement(
           type: element.type,
           text: textPages[0],
+          imageBytes: element.imageBytes,
         ),
       );
+
+      previousElementType = EpubElementType.paragraph;
 
       // Current page is now full
       pages.add(
@@ -1111,6 +1237,7 @@ List<String> paginateText(
 
       currentPageElements = [];
       isFirstElementOnPage = true;
+      previousElementType = null;
 
       // Remaining parts each get their own full page
       for (int i = 1; i < textPages.length; i++) {
@@ -1121,6 +1248,7 @@ List<String> paginateText(
                 EpubPageElement(
                   type: element.type,
                   text: textPages[i],
+                  imageBytes: element.imageBytes,
                 ),
               ],
             ),
@@ -1130,6 +1258,7 @@ List<String> paginateText(
             EpubPageElement(
               type: element.type,
               text: textPages[i],
+              imageBytes: element.imageBytes,
             ),
           );
 
@@ -1142,6 +1271,7 @@ List<String> paginateText(
               );
 
           isFirstElementOnPage = false;
+          previousElementType = EpubElementType.paragraph;
         }
       }
     }
@@ -1168,6 +1298,43 @@ Future<void> loadElements() async {
   });
 }
 
+int? getImageWidth(Uint8List? imageBytes) {
+  if (imageBytes == null) {
+    return null;
+  }
+
+  final image = img.decodeImage(imageBytes);
+
+  return image?.width;
+}
+
+int? getImageHeight(Uint8List? imageBytes) {
+  if (imageBytes == null) {
+    return null;
+  }
+
+  final image = img.decodeImage(imageBytes);
+
+  return image?.height;
+}
+
+double? getImageHeightForWidth(
+  Uint8List? imageBytes,
+  double pageWidth,
+) {
+  final imageWidth = getImageWidth(imageBytes);
+  final imageHeight = getImageHeight(imageBytes);
+
+  if (imageWidth == null || imageHeight == null) {
+    return null;
+  }
+
+  final displayWidth =
+      imageWidth < pageWidth ? imageWidth.toDouble() : pageWidth;
+
+  return displayWidth * imageHeight / imageWidth;
+}
+
   @override
   Widget build(BuildContext context) {
  
@@ -1186,240 +1353,123 @@ Future<void> loadElements() async {
             final pageHeight = constraints.maxHeight;
 
 
-            if (pages.isEmpty && !isPaginating) {
-              isPaginating = true;
+           if (
+            !isPaginating &&
+            (
+              pages.isEmpty ||
+              pageWidth != lastPageWidth ||
+              pageHeight != lastPageHeight
+            )
+          ) {
+            isPaginating = true;
 
-              WidgetsBinding.instance.addPostFrameCallback((_) {
-                if (!mounted) return;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (!mounted) return;
 
-                print('ELEMENTS: ${elements.length}');
-                print('PAGE HEIGHT: $pageHeight');
-
-                final newPages = paginateElements(
-                  elements,
-                  pageWidth,
-                  pageHeight,
-                  textStyle,
-                  context,
-                );
-
-                print('PAGES GENERATED: ${newPages.length}');
-
-
-                setState(() {
-                  pages = newPages;
-                });
-              });
-            }
-
-            if (pages.isEmpty) {
-              return const Center(
-                child: CircularProgressIndicator(),
+              final newPages = paginateElements(
+                elements,
+                pageWidth,
+                pageHeight,
+                textStyle,
+                context,
               );
+
+              print('PAGES GENERATED: ${newPages.length}');
+
+              setState(() {
+                pages = newPages;
+                lastPageWidth = pageWidth;
+                lastPageHeight = pageHeight;
+                isPaginating = false;
+              });
+            });
+          }
+
+          if (pages.isEmpty) {
+            return const Center(
+              child: CircularProgressIndicator(),
+            );
+          }
+
+          return ListView.builder(
+            itemCount: pages.length,
+            itemBuilder: (context, pageIndex) {
+              final page = pages[pageIndex];
+
+            double renderedHeight = 0;
+
+            for (int i = 0; i < page.elements.length; i++) {
+              final element = page.elements[i];
+          
+              renderedHeight += getTextHeight(
+                element.text,
+                pageWidth,
+                element.type == EpubElementType.heading
+                    ? headingStyle
+                    : textStyle,
+                context,
+              );
+
+              if (i < page.elements.length - 1 &&
+                  element.type == EpubElementType.heading &&
+                  page.elements[i + 1].type == EpubElementType.paragraph) {
+                renderedHeight += headingSpacing;
+              }
+
+              if (i < page.elements.length - 1 &&
+                  element.type == EpubElementType.paragraph &&
+                  page.elements[i + 1].type == EpubElementType.paragraph) {
+                renderedHeight += paragraphSpacing;
+              }
             }
 
-return ListView.builder(
-  itemCount: pages.length,
-  itemBuilder: (context, pageIndex) {
-    final page = pages[pageIndex];
-    print(
-  'PAGE $pageIndex: '
-  'elements=${page.elements.length}, '
-  'height=${page.elements.fold<double>(
-    0,
-    (sum, element) =>
-        sum +
-        getTextHeight(
-          element.text,
-          pageWidth,
-          element.type == EpubElementType.heading
-              ? headingStyle
-              : textStyle,
-          context,
-        ),
-  )}',
-);
+            return Column(
+              children: [
+                SizedBox(
+                  height: pageHeight,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      for (int i = 0; i < page.elements.length; i++) ...[
+                      if (page.elements[i].type == EpubElementType.image)
+                        Image.memory(
+                          page.elements[i].imageBytes!,
+                          width: (getImageWidth(page.elements[i].imageBytes) ?? pageWidth)
+                              .clamp(0, pageWidth)
+                              .toDouble(),
+                        )
+                      else
+                        Text(
+                          page.elements[i].text,
+                          style: page.elements[i].type == EpubElementType.heading
+                              ? headingStyle
+                              : textStyle,
+                          textScaler: MediaQuery.textScalerOf(context),
+                        ),
 
-    return Column(
-      children: [
-        SizedBox(
-          height: pageHeight,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              for (int i = 0; i < page.elements.length; i++) ...[
-                Text(
-                  page.elements[i].text,
-                  style: page.elements[i].type == EpubElementType.heading
-                      ? headingStyle
-                      : textStyle,
-                  textScaler: MediaQuery.textScalerOf(context),
+                        if (i < page.elements.length - 1 &&
+                          page.elements[i].type == EpubElementType.heading &&
+                          page.elements[i + 1].type == EpubElementType.paragraph)
+                          SizedBox(height: headingSpacing),
+
+                        if (i < page.elements.length - 1 &&
+                          page.elements[i].type == EpubElementType.paragraph &&
+                          page.elements[i + 1].type == EpubElementType.paragraph)
+                          SizedBox(height: paragraphSpacing),
+                      ],
+                    ],
+                  ),
                 ),
-
-                if (i < page.elements.length - 1 &&
-                    page.elements[i].type == EpubElementType.paragraph &&
-                    page.elements[i + 1].type == EpubElementType.paragraph)
-                  SizedBox(height: paragraphSpacing),
+                const Divider(),
               ],
-            ],
-          ),
-        ),
-        const Divider(),
-      ],
-    );
-  },
-);
+            );
           },
-        ),
-      ),
-
-    ],
+        );
+      },
+    ),
   ),
+],),
 ),
-
-        //  body: Column(
-        //   children: [
-        //     Expanded(
-        //       child: Column(
-        //         children: [
-        //           for (final element in pages[currentPage].elements)
-        //             Text(
-        //               element.text,
-        //               style: const TextStyle(fontSize: 18),
-        //             ),
-        //         ],
-        //       ),
-        //     ),
-
-        //     Row(
-        //       mainAxisAlignment: MainAxisAlignment.center,
-        //       children: [
-        //         ElevatedButton(
-        //           onPressed: currentPage > 0
-        //               ? () {
-        //                   setState(() {
-        //                     currentPage--;
-        //                   });
-        //                 }
-        //               : null,
-        //           child: const Text('Previous'),
-        //         ),
-
-        //         const SizedBox(width: 20),
-
-        //         ElevatedButton(
-        //           onPressed: currentPage < pages.length - 1
-        //               ? () {
-        //                   setState(() {
-        //                     currentPage++;
-        //                   });
-        //                 }
-        //               : null,
-        //           child: const Text('Next'),
-        //         ),
-        //       ],
-        //     ),
-
-        //     const SizedBox(height: 20),
-        //   ],
-        // ),
-      );
-      // SafeArea(
-      //   child: epub.EpubView(
-      //     controller: controller,
-      //     builders: epub.EpubViewBuilders<epub.DefaultBuilderOptions>(
-      //       options: epub.DefaultBuilderOptions(
-      //         paragraphPadding: EdgeInsetsGeometry.symmetric(horizontal: 16, vertical: 0),
-      //         textStyle: TextStyle(fontSize: 16,)
-      //       ),
-      //         chapterDividerBuilder: (_) =>  SizedBox.shrink(),
-      //         chapterBuilder: (context, builders, document, chapters, paragraphs, index, chapterIndex, paragraphIndex, onExternalLinkPressed) {
-      //           if (paragraphs.isEmpty) {
-      //           return Container();
-      //         }
-
-
-      //         final element = paragraphs[index].element;
-
-      //         EpubElementType type;
-
-      //         switch (element.localName) {
-      //           case 'h1':
-      //           case 'h2':
-      //           case 'h3':
-      //           case 'h4':
-      //           case 'h5':
-      //           case 'h6':
-      //             type = EpubElementType.heading;
-      //             break;
-
-      //           case 'p':
-      //             type = EpubElementType.paragraph;
-      //             break;
-
-      //           case 'img':
-      //             type = EpubElementType.image;
-      //             break;
-
-      //           default:
-      //             type = EpubElementType.other;
-      //             print('UNKNOWN TAG: ${element.localName}');
-      //             print('HTML: ${element.outerHtml}');
-      //             type = EpubElementType.other;
-      //         }
-
-      //         final epubElement = EpubElement(
-      //         type: type,
-      //         text: element.text,
-      //         html: element.outerHtml,
-      //       );
-
-      //       elements.add(epubElement);
-
-      //         final defaultBuilder = builders as epub.EpubViewBuilders<epub.DefaultBuilderOptions>;
-      //         final options = defaultBuilder.options;
-
-      //         return Column(
-      //           children: <Widget>[
-      //             if (chapterIndex >= 0 && paragraphIndex == 0)
-      //               builders.chapterDividerBuilder(chapters[chapterIndex]),
-      //             Html(
-      //               data: paragraphs[index].element.outerHtml,
-      //               onLinkTap: (href, _, __) => onExternalLinkPressed(href!),
-      //               style: {
-      //                 'html': Style(
-      //                   color: const Color.fromARGB(255, 208, 189, 111),
-      //                   backgroundColor: const Color.fromARGB(255, 126, 129, 58),
-      //                   padding: HtmlPaddings.only(
-      //                     top: (options.paragraphPadding as EdgeInsets?)?.top,
-      //                     right: (options.paragraphPadding as EdgeInsets?)?.right,
-      //                     bottom: (options.paragraphPadding as EdgeInsets?)?.bottom,
-      //                     left: (options.paragraphPadding as EdgeInsets?)?.left,
-      //                   ),
-      //                 ).merge(Style.fromTextStyle(options.textStyle)),
-      //               },
-      //               extensions: [
-      //                 TagExtension(
-      //                   tagsToExtend: {"img"},
-      //                   builder: (imageContext) {
-      //                     final url =
-      //                         imageContext.attributes['src']!.replaceAll('../', '');
-      //                     final content = Uint8List.fromList(
-      //                         document.Content!.Images![url]!.Content!);
-      //                     return Image(
-      //                       image: MemoryImage(content),
-      //                     );
-      //                   },
-      //                 ),
-                      
-      //               ],
-      //             ),
-      //           ],
-      //         );
-      //       },
-      //     ),
-      //   )
-      // ),
-    //);
-  }
+);
+}
 }

@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'package:epub_reader/basic_info.dart';
 import 'package:epub_reader/models/epub_element.dart';
+import 'package:epub_reader/models/reader_item.dart';
 import 'package:epub_view/epub_view.dart' as epub;
 import 'package:flutter/material.dart';
 import 'dart:convert';
@@ -10,6 +11,7 @@ import 'package:epubx/epubx.dart' as epubx;
 import 'package:flutter_html/flutter_html.dart';
 import 'package:xml/xml.dart';
 import 'package:image/image.dart' as img;
+import 'package:html/dom.dart' as dom;
 
 class ReaderPage extends StatefulWidget {
   final BasicInfo book;
@@ -62,28 +64,83 @@ class _ReaderPageState extends State<ReaderPage> {
  try {
   final book = await epubx.EpubReader.readBook(bytes);
 
-final image = book.Content?.Images?['Images/image_rsrc34F.jpg'];
+  print('CONTENT TYPE: ${book.Content.runtimeType}');
 
-print('IMAGE OBJECT: $image');
-print('IMAGE RUNTIME TYPE: ${image.runtimeType}');
-print('IMAGE BYTES: ${image?.Content?.length}');
+  print('IMAGES: ${book.Content?.Images?.keys}');
+  print('CSS: ${book.Content?.Css?.keys}');
+  print('HTML: ${book.Content?.Html?.keys}');
 
+  print('CONTENT: ${book.Content}');
 
-if (image != null) {
-  print('FIRST 10 BYTES: ${image.Content!.take(10).toList()}');
+for (final css in book.Content?.Css?.values ?? <epubx.EpubTextContentFile>[]) {
+  print('========== CSS ==========');
+  print(css.Content);
 }
+
+final coverBytes = Uint8List.fromList(
+  img.encodeJpg(book.CoverImage!),
+);
+
+final coverElement = EpubElement(
+  type: EpubElementType.image,
+  text: '',
+  html: '',
+  imageBytes: coverBytes,
+  isCover: true
+);
+
+final images = book.Content?.Images;
+
+if (images != null) {
+  for (final entry in images.entries) {
+    final bytes = entry.value.Content;
+
+    if (bytes == null) {
+      continue;
+    }
+  }
+}
+
 
   final allElements = <EpubElement>[];
 
-  for (final chapter in book.Chapters!) {
-    final chapterElements = getChapterElements(chapter, book.Content?.Images);    
+  allElements.add(coverElement);
 
-    allElements.addAll(chapterElements);
+for (final chapter in book.Chapters!) {
+  final html = chapter.HtmlContent ?? '';
+
+  if (html.contains('<svg')) {
+    print('SVG FOUND IN: ${chapter.Title}');
   }
 
-  elements = allElements;
+  final chapterElements = getChapterElements(
+    chapter,
+    book.Content?.Images,
+  );
 
-  print('TOTAL ELEMENTS: ${elements.length}');
+  allElements.addAll(chapterElements);
+
+final chapterHtml = chapter.HtmlContent;
+print('CHAPTER HTML: ${chapter.HtmlContent != null}');
+
+if (chapterHtml == null) {
+  continue;
+}
+
+final document = dom.Document.html(chapterHtml);
+
+final extractor = EpubContentExtractor();
+
+final items = extractor.extractContent(document, book);
+
+for (final item in items.take(20)) {
+  print(
+    'TYPE: ${item.type} | TEXT: ${item.text}',
+  );
+}
+}
+
+  elements = allElements;
 
   return book;
 } catch (e) {
@@ -101,12 +158,6 @@ if (image != null) {
 
 List<XmlElement> parseChapterElements(String htmlContent) {
   final document = XmlDocument.parse(htmlContent);
-
-  final images = document.findAllElements('img');
-
-  for (final image in images) {
-    print('IMAGE: ${image.outerXml}');
-  }
 
   return document
       .findAllElements('body')
@@ -131,16 +182,30 @@ EpubElement convertToEpubElement(
   XmlElement element,
   Map<String, epubx.EpubByteContentFile>? images,
 ) {
-
   final isImage = element.name.local == 'img';
 
-  final imageElements = element.findElements('img');
+  final imageElements = element.findAllElements('img');
+
   final containsImage = imageElements.isNotEmpty;
-  if (containsImage) {
-    print('DIV CONTAINS IMAGE: ${imageElements.first.outerXml}');
-  }
 
   final className = element.getAttribute('class');
+
+for (final child in element.children.whereType<XmlElement>()) {
+  if (child.getAttribute('class') == 'ugc chapter-ugc') {
+    for (final content in child.children.whereType<XmlElement>()) {
+      for (final item in content.children.whereType<XmlElement>()) {
+        print(
+          'ITEM: ${item.name.local} | '
+          'CLASS: ${item.getAttribute('class')} | '
+          'TEXT: ${item.innerText.trim().substring(
+            0,
+            item.innerText.trim().length.clamp(0, 80),
+          )}',
+        );
+      }
+    }
+  }
+}
 
   EpubElementType type;
 
@@ -174,11 +239,6 @@ EpubElement convertToEpubElement(
       }
     }
   }
-
-  if (imageBytes != null) {
-    print('IMAGE BYTES FOUND: ${imageBytes.length}');
-  }
-
 
   return EpubElement(
     type: type,
@@ -986,7 +1046,6 @@ double getTextHeight(
   }
 
   
-
  List<EpubPage> paginateElements(
   List<EpubElement> elements,
   double pageWidth,
@@ -1003,7 +1062,6 @@ double getTextHeight(
 
   for (final element in elements) {
 
-
     final elementStyle =
         element.type == EpubElementType.heading
             ? headingStyle
@@ -1012,6 +1070,40 @@ double getTextHeight(
     if (element.type != EpubElementType.paragraph &&
         element.type != EpubElementType.heading &&
         element.type != EpubElementType.image) {
+      continue;
+    }
+
+    if (element.isCover) {
+      // Finish the current page if there is anything on it.
+      if (currentPageElements.isNotEmpty) {
+        pages.add(
+          EpubPage(
+            elements: currentPageElements,
+          ),
+        );
+      }
+
+      // Put the cover on its own page.
+      currentPageElements = [
+        EpubPageElement(
+          type: element.type,
+          text: '',
+          imageBytes: element.imageBytes,
+        ),
+      ];
+
+      pages.add(
+        EpubPage(
+          elements: currentPageElements,
+        ),
+      );
+
+      // Start a fresh page for the next element.
+      currentPageElements = [];
+      remainingHeight = pageHeight;
+      isFirstElementOnPage = true;
+      previousElementType = null;
+
       continue;
     }
 
@@ -1029,11 +1121,6 @@ double getTextHeight(
       if (imageHeight == null) {
         continue;
       }
-
-      print(
-        'IMAGE: height=$imageHeight, '
-        'remaining=$remainingHeight',
-      );
 
       if (imageHeight <= remainingHeight) {
         currentPageElements.add(
@@ -1373,8 +1460,6 @@ double? getImageHeightForWidth(
                 textStyle,
                 context,
               );
-
-              print('PAGES GENERATED: ${newPages.length}');
 
               setState(() {
                 pages = newPages;

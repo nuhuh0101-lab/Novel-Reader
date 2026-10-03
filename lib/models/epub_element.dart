@@ -12,12 +12,15 @@ class EpubElement {
   final String text;
   final String html;
   final Uint8List? imageBytes;
+  final bool isCover;
 
   EpubElement({
     required this.type,
     required this.text,
     required this.html,
-    this.imageBytes
+    this.imageBytes,
+    this.isCover = false,
+
   });
 }
 

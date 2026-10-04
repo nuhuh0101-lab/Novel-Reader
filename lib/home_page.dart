@@ -1,7 +1,7 @@
+import 'package:epub_reader/epub_reader_page.dart';
 import 'package:flutter/material.dart';
 import 'dart:io';
 import 'dart:typed_data';
-import 'package:epub_reader/reader_page.dart';
 import 'package:epubx/epubx.dart' as epubx;
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/rendering.dart';
@@ -594,7 +594,7 @@ class _HomePageState extends State<HomePage> {
         title: Text("Folk Reader", style: TextStyle(color: Colors.white),),
         shadowColor: Colors.grey,
         elevation: 1,
-        backgroundColor: Color.fromARGB(255, 213, 108, 171),
+        backgroundColor: Color.fromARGB(255, 131, 21, 87),
       ),
       body: SafeArea(
           child: ListView.builder(
@@ -607,7 +607,7 @@ class _HomePageState extends State<HomePage> {
                   height: 180,
                   margin: EdgeInsets.only(bottom: 10),
                   decoration: BoxDecoration(
-                    gradient: LinearGradient(colors: [const Color.fromARGB(255, 123, 241, 33), const Color.fromARGB(255, 255, 139, 253)])
+                    gradient: LinearGradient(colors: [const Color.fromARGB(255, 170, 7, 107), const Color.fromARGB(255, 97, 4, 95)])
                     
                   ),
                   child: Row(
@@ -619,8 +619,7 @@ class _HomePageState extends State<HomePage> {
                             print('OPENING READER PAGE');
                             Navigator.push(
                               context, MaterialPageRoute(
-                                builder: (context) => ReaderPage(book: books[index]
-                                )
+                                builder: (context) => EpubReaderPage(epubPath: _savedFilePaths[index],)
                               )
                             );
                           },
@@ -637,8 +636,7 @@ class _HomePageState extends State<HomePage> {
                             print('OPENING READER PAGE');
                             Navigator.push(
                               context, MaterialPageRoute(
-                                builder: (context) => ReaderPage(book: books[index]
-                                )
+                                builder: (context) => EpubReaderPage(epubPath: _savedFilePaths[index],)
                               )
                             );
                           },
@@ -688,7 +686,7 @@ class _HomePageState extends State<HomePage> {
                   ),
                 );
           }
-              
+        
         )),
     );
   }
